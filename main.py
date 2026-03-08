@@ -12,8 +12,7 @@ st.set_page_config(page_title="Rich 戰情室")
 st.title("🐱 08:45 準時開盤戰情室")
 
 # 商品設定
-SYMBOL_MAP = {"加權指數": "^TWII", "微台近全": "WTX=F", "台積電": "2330.TW"}
-target = st.selectbox("商品", list(SYMBOL_MAP.keys()))
+SYMBOL_MAP = {"加權指數": "^TWII")
 
 # 抓取數據 (不使用 altair 繪圖，純文字顯示最穩)
 df = yf.download(SYMBOL_MAP[target], period="5d", progress=False)
