@@ -2,27 +2,28 @@ import os
 import subprocess
 import sys
 
-# 1. 環境衝突解決方案
+# 1. 核心環境校正：必須放在最頂端，解決 Protobuf 版本衝突
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
 import pytz
+import altair as alt
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# 2. 戰情室基礎設定 (優化手機顯示)
+# 2. 戰情室基礎設定
 st.set_page_config(
     page_title="RICH CAT 終極戰情室", 
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# 30秒自動刷新畫面
+# 每 30 秒自動刷新一次頁面，保持即時點位更新
 st_autorefresh(interval=30 * 1000, key="datarefresh") 
 
-# 3. 定義追蹤標的
+# 3. 標的清單設定
 SYMBOL_MAP = {
     "加權指數": "^TWII",
     "微台近全": "WTX=F",
@@ -37,31 +38,36 @@ selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys())
 @st.cache_data(ttl=20)
 def get_data(symbol):
     try:
-        # 下載最近 10 天數據
+        # 下載最近 10 天數據 (天線)
         df = yf.download(symbol, period="10d", interval="1d", progress=False)
         if df is not None and not df.empty:
-            # 處理 MultiIndex 欄位問題
+            # 處理 yfinance 可能回傳的 MultiIndex 欄位 (解決抓不到 Close 的問題)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             return df
         return None
     except Exception as e:
+        st.error(f"數據抓取錯誤: {e}")
         return None
 
-# 執行資料獲取
+# 執行資料抓取
 df = get_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
 current_time = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
 st.write(f"🕒 台北實時：`{current_time}`")
 
-# 4. 點位計算與顯示
+# 4. 點位計算與視覺化顯示
 if df is not None and not df.empty:
+    # 取得最新一筆資料
     last = df.iloc[-1]
     
-    # 數值轉換確保計算正確
+    # 強制轉換為浮點數，避免 Series 物件計算錯誤
     def to_f(v): 
-        return float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
+        try:
+            return float(v.iloc[0]) if hasattr(v, 'iloc') else float(v)
+        except:
+            return float(v)
     
     c = to_f(last['Close'])
     h = to_f(last['High'])
@@ -70,22 +76,24 @@ if df is not None and not df.empty:
     
     st.success(f"✅ {selected_label} 連線成功")
     
-    # 手機版建議使用 columns
+    # 戰情指標看板
     col1, col2, col3 = st.columns(3)
     col1.metric("當前價", f"{c:,.2f}")
-    col2.metric("最高", f"{h:,.2f}")
-    col3.metric("最低", f"{l:,.2f}")
+    col2.metric("本日最高", f"{h:,.2f}")
+    col3.metric("本日最低", f"{l:,.2f}")
     
     st.divider()
     
-    # 關鍵戰鬥點位
+    # 強哥核心：戰技點位計算
     pressure = l + diff * 0.618
     support = l + diff * 0.382
     
-    st.error(f"🚀 壓力區 (0.618)：{pressure:,.2f}")
-    st.info(f"🛡️ 支撐區 (0.382)：{support:,.2f}")
+    # 顯示關鍵點位
+    st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
+    st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
     
-    # 簡單圖表輔助
+    # 趨勢圖表
+    st.subheader("📊 近期走勢")
     st.line_chart(df['Close'])
 else:
-    st.error("❌ 獲取資料失敗，請檢查網路或標的代碼。")
+    st.error("❌ 伺服器忙碌或標的代碼錯誤，請點擊右側 Manage app 重啟。")
