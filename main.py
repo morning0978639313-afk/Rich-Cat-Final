@@ -1,35 +1,62 @@
+import os
+import subprocess
+import sys
+
+# 【防禦區 1】解決 Descriptors 報錯
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+# 【防禦區 2】暴力安裝：當伺服器無視 requirements.txt 時使用
+def force_install(package):
+    try:
+        __import__(package.replace('-', '_'))
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# 強制安裝所有曾報錯缺少的零件
+for pkg in ["yfinance", "pandas", "pytz", "streamlit-autorefresh", "altair"]:
+    force_install(pkg)
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import pytz
+from streamlit_autorefresh import st_autorefresh
 
-# 強制設定環境變數
-import os
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+st.set_page_config(page_title="RICH CAT 戰情室", layout="centered")
+st_autorefresh(interval=30 * 1000, key="refresh")
 
-st.set_page_config(page_title="Rich 戰情室")
-st.title("🐱 08:45 準時開盤戰情室")
+MAP = {"加權指數": "^TWII", "微台近全": "WTX=F", "台積電": "2330.TW", "台積電 ADR": "TSM"}
+st.title("🐱 RICH CAT 終極戰情室")
+selected = st.selectbox("請選擇商品", list(MAP.keys()))
 
-# 商品設定
-SYMBOL_MAP = {"加權指數": "^TWII")
+@st.cache_data(ttl=20)
+def get_data(symbol):
+    try:
+        df = yf.download(symbol, period="10d", progress=False)
+        if df is not None and isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except: return None
 
-# 抓取數據 (不使用 altair 繪圖，純文字顯示最穩)
-df = yf.download(SYMBOL_MAP[target], period="5d", progress=False)
+df = get_data(MAP[selected])
+tz = pytz.timezone('Asia/Taipei')
+st.write(f"🕒 台北：{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}")
 
-if not df.empty:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    
+if df is not None and not df.empty:
     last = df.iloc[-1]
-    c, h, l = float(last['Close']), float(last['High']), float(last['Low'])
+    def to_f(v): return float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
+    c, h, l = to_f(last['Close']), to_f(last['High']), to_f(last['Low'])
     diff = h - l
     
-    # 計算點位
-    st.metric(f"當前 {target}", f"{c:,.2f}")
-    st.error(f"🚀 壓力位 (0.618): {l + diff * 0.618:,.2f}")
-    st.info(f"⚖️ 多空中軸 (0.500): {l + diff * 0.500:,.2f}")
-    st.success(f"🛡️ 支撐位 (0.382): {l + diff * 0.382:,.2f}")
-    
-    tz = pytz.timezone('Asia/Taipei')
-    st.write(f"最後更新：{datetime.now(tz).strftime('%H:%M:%S')}")
+    st.success(f"📈 {selected} 連線成功 (暴力修復模式)")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("價格", f"{c:,.2f}")
+    col2.metric("高點", f"{h:,.2f}")
+    col3.metric("低點", f"{l:,.2f}")
+    st.divider()
+    # 計算黃金點位
+    st.info(f"🚀 壓力區 (0.618)：**{l + diff * 0.618:,.2f}**")
+    st.warning(f"🛡️ 支撐區 (0.382)：**{l + diff * 0.382:,.2f}**")
+else:
+    st.error("❌ 數據讀取中，請稍候。")
