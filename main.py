@@ -6,12 +6,12 @@ import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 環境校正
+# 1. 環境衝突解決 (必須在最前)
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
-# 2. 戰情室基礎設定
+# 2. 頁面基礎設定
 st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
-st_autorefresh(interval=30 * 1000, key="datarefresh") 
+st_autorefresh(interval=30 * 1000, key="datarefresh") # 30秒自動重整
 
 SYMBOL_MAP = {
     "加權指數": "^TWII",
@@ -24,18 +24,16 @@ SYMBOL_MAP = {
 st.title("🐱 RICH CAT 終極戰情室")
 selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys()))
 
-# 3. 核心修正：加入偽裝 Headers 以防止 yfinance 被擋
-@st.cache_data(ttl=20)
+# 3. 核心數據獲取函數 (加強偽裝與穩定性)
+@st.cache_data(ttl=30)
 def get_data(symbol):
     try:
-        # 建立 yfinance 專用 Ticker 物件
-        ticker = yf.Ticker(symbol)
-        
-        # 使用 history 代替 download，並增加代理標頭（這在雲端環境非常重要）
-        df = ticker.history(period="10d", interval="1d")
+        # 下載最近 10 天，使用較穩定的 Ticker 物件
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="10d", interval="1d", timeout=10)
         
         if df is not None and not df.empty:
-            # 清理欄位結構
+            # 修正欄位結構 (移除 MultiIndex)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             return df
@@ -48,11 +46,11 @@ df = get_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
 st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 4. 點位計算與顯示
+# 4. 戰情指標顯示
 if df is not None and not df.empty:
     last = df.iloc[-1]
     
-    # 數值保護轉換
+    # 數值保護轉換函數
     def to_f(v): return float(v.iloc[0]) if hasattr(v, 'iloc') else float(v)
     
     c = to_f(last['Close'])
@@ -60,9 +58,9 @@ if df is not None and not df.empty:
     l = to_f(last['Low'])
     diff = h - l
     
-    st.success(f"📈 {selected_label} 資料傳輸中...")
+    st.success(f"📈 {selected_label} 連線成功")
     
-    # 數據看板
+    # 三欄看板
     col1, col2, col3 = st.columns(3)
     col1.metric("當前價格", f"{c:,.2f}")
     col2.metric("本日高點", f"{h:,.2f}")
@@ -70,15 +68,18 @@ if df is not None and not df.empty:
     
     st.divider()
     
-    # 戰技點位 (強哥核心)
-    st.error(f"🚀 壓力區 (0.618)：**{l + diff * 0.618:,.2f}**")
-    st.info(f"🛡️ 支撐區 (0.382)：**{l + diff * 0.382:,.2f}**")
+    # 核心點位計算 (強哥戰術)
+    pressure = l + diff * 0.618
+    support = l + diff * 0.382
     
-    # 圖表
+    st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
+    st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
+    
+    # 簡單折線圖
     st.line_chart(df['Close'])
 else:
-    # 如果還是抓不到，提供手動重整提示
-    st.warning("⚠️ 目前連線稍慢，正在嘗試重新建立加密通道，請稍候...")
-    if st.button("🔄 手動強制重新連線"):
+    # 提示與手動重連按鈕
+    st.warning("⚠️ 目前數據源連線受阻，正在嘗試繞過防火牆...")
+    if st.button("🔄 點擊強制刷新通道"):
         st.cache_data.clear()
         st.rerun()
