@@ -3,15 +3,14 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pytz
+import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 環境衝突解決 (必須在最前)
+# 1. 核心設定
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-
-# 2. 頁面基礎設定
 st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
-st_autorefresh(interval=30 * 1000, key="datarefresh") # 30秒自動重整
+st_autorefresh(interval=30 * 1000, key="datarefresh") 
 
 SYMBOL_MAP = {
     "加權指數": "^TWII",
@@ -24,16 +23,21 @@ SYMBOL_MAP = {
 st.title("🐱 RICH CAT 終極戰情室")
 selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys()))
 
-# 3. 核心數據獲取函數 (加強偽裝與穩定性)
+# 2. 強化版數據獲取：加入 Session 偽裝
 @st.cache_data(ttl=30)
 def get_data(symbol):
     try:
-        # 下載最近 10 天，使用較穩定的 Ticker 物件
-        tk = yf.Ticker(symbol)
-        df = tk.history(period="10d", interval="1d", timeout=10)
+        # 建立一個偽裝成瀏覽器的連線會話
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        
+        # 使用 session 進行下載
+        df = yf.download(symbol, period="10d", interval="1d", session=session, progress=False)
         
         if df is not None and not df.empty:
-            # 修正欄位結構 (移除 MultiIndex)
+            # 處理 MultiIndex 欄位
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             return df
@@ -46,11 +50,11 @@ df = get_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
 st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 4. 戰情指標顯示
+# 3. 顯示邏輯
 if df is not None and not df.empty:
     last = df.iloc[-1]
     
-    # 數值保護轉換函數
+    # 數值保護
     def to_f(v): return float(v.iloc[0]) if hasattr(v, 'iloc') else float(v)
     
     c = to_f(last['Close'])
@@ -60,7 +64,6 @@ if df is not None and not df.empty:
     
     st.success(f"📈 {selected_label} 連線成功")
     
-    # 三欄看板
     col1, col2, col3 = st.columns(3)
     col1.metric("當前價格", f"{c:,.2f}")
     col2.metric("本日高點", f"{h:,.2f}")
@@ -68,18 +71,14 @@ if df is not None and not df.empty:
     
     st.divider()
     
-    # 核心點位計算 (強哥戰術)
-    pressure = l + diff * 0.618
-    support = l + diff * 0.382
+    # 關鍵點位
+    st.error(f"🚀 壓力區 (0.618)：**{l + diff * 0.618:,.2f}**")
+    st.info(f"🛡️ 支撐區 (0.382)：**{l + diff * 0.382:,.2f}**")
     
-    st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
-    st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
-    
-    # 簡單折線圖
     st.line_chart(df['Close'])
 else:
-    # 提示與手動重連按鈕
-    st.warning("⚠️ 目前數據源連線受阻，正在嘗試繞過防火牆...")
-    if st.button("🔄 點擊強制刷新通道"):
+    st.warning("⚠️ Yahoo 數據源目前對雲端 IP 進行流量管制。")
+    st.info("💡 建議：點擊下方按鈕強制清除快取並重連。若多次失敗，可能是 Yahoo 暫時封鎖了 Streamlit 伺服器區域。")
+    if st.button("🔄 嘗試更換加密通道重連"):
         st.cache_data.clear()
         st.rerun()
