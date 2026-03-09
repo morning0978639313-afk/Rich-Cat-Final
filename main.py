@@ -33,10 +33,10 @@ api_client = init_api(MY_TOKEN)
 @st.cache_data(ttl=3)
 def get_tmf_full_data():
     now_tw = datetime.now(tw_tz)
-    # 抓取包含昨日的數據，這對「全日盤」至關重要，因為夜盤是從昨天下午開始的
+    # 抓取包含昨日的數據，這對「全日盤」至關重要，因為夜盤是從今天下午開始的
     start_dt = (now_tw - timedelta(days=1)).strftime('%Y-%m-%d')
     try:
-        # 嘗試抓取 TMF (微台全)
+        # 嘗試抓取 TMF (微台03全)
         df = api_client.taiwan_futures_tick(futures_id="TMF", date=start_dt)
         if df is None or df.empty:
             return None, "目前 TMF 無數據回傳"
