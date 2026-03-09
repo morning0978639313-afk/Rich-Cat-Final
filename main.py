@@ -2,72 +2,67 @@ import os
 import streamlit as st
 import pandas as pd
 import pytz
-import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 基礎設定：解決環境衝突並開啟 30 秒自動刷新
+# 1. 核心設定
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
-st_autorefresh(interval=30 * 1000, key="datarefresh") 
+st_autorefresh(interval=60 * 1000, key="datarefresh") 
 
-# 穩定標的清單
+# 穩定台股代碼清單
 SYMBOL_MAP = {
-    "加權指數": "^TWII",
-    "微台近全": "WTX=F",
-    "台積電": "2330.TW",
-    "鴻海": "2317.TW",
-    "ESG 永續 (00850)": "00850.TW"
+    "台積電": "2330",
+    "鴻海": "2317",
+    "00850": "00850",
+    "加權指數": "TAIWAN_STOCK_INDEX"
 }
 
 st.title("🐱 RICH CAT 終極戰情室")
 selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys()))
 
-# 2. 核心：高頻數據抓取引擎
-@st.cache_data(ttl=10)
-def get_live_data(symbol):
+# 2. 核心數據獲取：使用 FinMind API (不需 Key)
+@st.cache_data(ttl=60)
+def get_finmind_data(stock_id):
     try:
-        # 使用 1d 範圍與 1m 間隔，這能繞過 Yahoo 的緩存延遲數據
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m"
-        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
+        dl = DataLoader()
+        start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
         
-        result = data['chart']['result'][0]
-        indicators = result['indicators']['quote'][0]
-        
-        # 精準取值：排除空值並抓取最後一個交易價格
-        closes = [x for x in indicators['close'] if x is not None]
-        highs = [x for x in indicators['high'] if x is not None]
-        lows = [x for x in indicators['low'] if x is not None]
-        
-        if not closes:
-            return None, None, None
+        # 指數與個股判斷
+        if stock_id == "TAIWAN_STOCK_INDEX":
+            df = dl.taiwan_stock_index_daily(stock_id=stock_id, start_date=start_date)
+        else:
+            df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
             
-        c = closes[-1]
-        h = max(highs) if highs else c
-        l = min(lows) if lows else c
-        
-        return float(c), float(h), float(l)
+        if df is not None and not df.empty:
+            # 統一欄位名稱
+            df = df.rename(columns={'close': 'Close', 'high': 'High', 'low': 'Low', 'date': 'Date'})
+            return df
+        return None
     except:
-        return None, None, None
+        return None
 
 # 執行抓取
-c, h, l = get_live_data(SYMBOL_MAP[selected_label])
+df = get_finmind_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
 st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 3. 戰情看板顯示
-if c is not None:
+# 3. 戰情看板顯示 (使用最基礎、不噴錯的指令)
+if df is not None and not df.empty:
+    last = df.iloc[-1]
+    c, h, l = float(last['Close']), float(last['High']), float(last['Low'])
     diff = h - l
-    st.success(f"📈 {selected_label} 同步成功 (實時點位)")
+    
+    st.success(f"✅ {selected_label} 數據已成功同步")
     
     col1, col2, col3 = st.columns(3)
     col1.metric("即時價", f"{c:,.2f}")
     col2.metric("今日高", f"{h:,.2f}")
     col3.metric("今日低", f"{l:,.2f}")
     
-    st.divider()
+    # 畫出水平線 (替代 st.divider)
+    st.markdown("---")
     
     # 強哥核心：關鍵點位計算
     pressure = l + diff * 0.618
@@ -76,4 +71,4 @@ if c is not None:
     st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
     st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
 else:
-    st.warning("⚠️ 數據源響應緩慢，請耐心等待 30 秒自動刷新...")
+    st.warning("⚠️ 數據源載入中，請耐心等待或確認 GitHub 零件已裝齊。")
