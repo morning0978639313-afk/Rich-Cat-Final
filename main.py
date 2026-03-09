@@ -1,87 +1,97 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, timedelta
 import pytz
 
-# --- 1. 極速更新與時區 ---
+# --- 1. 極速更新與時區設定 ---
 tw_tz = pytz.timezone('Asia/Taipei')
-st_autorefresh(interval=3000, key="tmf_aggressive_v13")
+st_autorefresh(interval=3000, key="tmf_mxf_full_hero")
 
 st.set_page_config(page_title="微台全實戰監控", layout="wide")
-st.title("📊 微台全 3分K - 數據攻堅版")
+st.title("🔥 微台全 3分K - 數據攻堅終結版")
 
-# --- 🔑 2. Token 與 登入 (強化防錯) ---
+# --- 🔑 2. Token 安全登入 (已填入 Rich 的 Token) ---
 MY_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wOSAyMDozOToxOSIsInVzZXJfaWQiOiJhcmljYTUxNSIsImVtYWlsIjoiZXZlbmNoZW41MTVAZ21haWwuY29tIiwiaXAiOiIxMjQuNi4xMS4yMTYifQ.NkLHnTiAp10uKfrc8qkt0YevD-Cc1XV062O1u3lBvh4"
 
 @st.cache_resource
-def get_api_session(token):
+def get_api(token):
     api = DataLoader()
-    # 嘗試多種登入語法以確保 Token 生效
-    for method in ["login", "login_by_token", "login_token"]:
-        if hasattr(api, method):
+    # 解決 AttributeError，自動搜尋正確的 login 方法
+    for m in ["login", "login_by_token", "login_token"]:
+        if hasattr(api, m):
             try:
-                getattr(api, method)(api_token=token)
+                getattr(api, m)(api_token=token)
                 return api
             except: continue
     return api
 
-api_client = get_api_session(MY_TOKEN)
+api_client = get_api(MY_TOKEN)
 
-# --- 3. 數據攻堅邏輯：多代號自動偵測 ---
-def fetch_mxf_full_data():
+# --- 3. 數據攻堅邏輯 (MXF 全日盤專用) ---
+def fetch_mxf_full():
     now_tw = datetime.now(tw_tz)
-    # 抓取今天與昨天的資料，確保「全日盤」跨夜不中斷
-    search_date = now_tw.strftime('%Y-%m-%d')
+    today = now_tw.strftime('%Y-%m-%d')
     
-    # 積極測試代號：MXF(官方), MXFR (全日連續), TMF (用戶), TMF202603 (當月)
-    candidates = ["MXF", "MXFR", "TMF", f"TMF{now_tw.strftime('%Y%m')}"]
-    
-    for cid in candidates:
+    # 積極測試代號：MXFR (微台全連續), MXF (微台)
+    for cid in ["MXFR", "MXF", "TMF"]:
         try:
-            df = api_client.taiwan_futures_tick(futures_id=cid, date=search_date)
+            df = api_client.taiwan_futures_tick(futures_id=cid, date=today)
             if df is not None and not df.empty and 'price' in df.columns:
-                return df, cid
+                return df, cid, "Tick"
         except: continue
-    return None, None
+        
+    # --- 終極備援：Snapshot (快照) 模式 ---
+    try:
+        snap = api_client.taiwan_futures_snapshot()
+        if snap is not None:
+            # 尋找微台全 (MXF) 的即時成交
+            target = snap[snap['futures_id'].str.contains("MXF|TMF", na=False)]
+            if not target.empty:
+                return target, "MXF_Snap", "Snapshot"
+    except: pass
+    
+    return None, None, "Fail"
 
-# --- 4. 渲染介面 ---
-st.write(f"⏰ **台灣站點時間**: {datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+# --- 4. 數據計算與 UI ---
+st.write(f"⏰ **台灣站點時間**: {datetime.now(tw_tz).strftime('%H:%M:%S')}")
 
-df_raw, success_id = fetch_mxf_full_data()
+df_raw, target_id, mode = fetch_mxf_full()
 
 if df_raw is not None:
-    st.success(f"🎯 數據攻堅成功！目前使用代號：**{success_id}**")
+    st.success(f"🎯 鎖定微台全數據：{target_id} ({mode} 模式)")
     
-    # --- 3分K 與指標運算 ---
-    df_raw['date_dt'] = pd.to_datetime(df_raw['date'] + ' ' + df_raw['time'])
-    df_raw = df_raw.set_index('date_dt')
-    df_3m = df_raw['price'].resample('3min').ohlc().dropna().reset_index()
-    
+    # 處理數據轉換為 3分K (如果是快照則模擬 K 棒)
+    if mode == "Tick":
+        df_raw['dt'] = pd.to_datetime(df_raw['date'] + ' ' + df_raw['time'])
+        df_raw = df_raw.set_index('dt')
+        df_3m = df_raw['price'].resample('3min').ohlc().dropna().reset_index()
+    else:
+        # 快照模式下，將成交價轉為當前 K 棒
+        df_3m = pd.DataFrame([{
+            'date': datetime.now(tw_tz),
+            'close': df_raw['last_price'].iloc[0],
+            'open': df_raw['open_price'].iloc[0],
+            'high': df_raw['high_price'].iloc[0],
+            'low': df_raw['low_price'].iloc[0]
+        }])
+
     if not df_3m.empty:
         last = df_3m.iloc[-1]
-        
-        # 簡易指標 (確保表格與指數先出來)
+        # 指標計算
         df_3m['ma5'] = df_3m['close'].rolling(5).mean()
-        buy_score = 5 if last['close'] > last['ma5'] else 0
+        buy_score = 5 if last['close'] > last.get('ma5', 0) else 0
         
+        # 顯示燈號
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("TMF 即時指數", f"{last['close']:.0f}")
-            # 紅綠燈 (Rich 對消邏輯簡化版)
-            l_html = f'<div style="width:60px;height:60px;background:{"red" if buy_score > 0 else "#220000"};border-radius:50%;display:inline-block;border:3px solid white;"></div>'
+            st.metric("即時點位 (全日盤)", f"{last['close']:.0f}")
+            l_html = f'<div style="width:70px;height:70px;background:{"red" if buy_score>0 else "#220000"};border-radius:50%;display:inline-block;border:3px solid white;box-shadow:{"0 0 20px red" if buy_score>0 else "none"};"></div>'
             st.markdown(l_html, unsafe_allow_html=True)
-            
         with c2:
-            st.write("📊 **即時 3分K 指標明細表**")
-            st.dataframe(df_3m.tail(5))
-    else:
-        st.warning("數據量不足，等待下一根 3分K 棒成型中...")
+            st.write("📊 **即時數據清單**")
+            st.table(df_3m.tail(3))
 else:
-    st.error("❌ 診斷結論：'data' 報錯持續。")
-    st.markdown("""
-    ### 🚀 積極處理建議：
-    如果多重代號依然抓不到，請在終端機或程式碼中嘗試 **`api_client.taiwan_futures_snapshot()`**。
-    這能抓取所有合約的當前價格。我們可以用「快照」的方式，每 3 分鐘紀錄一次價格，強制生成 3分K！
-    """)
+    st.error("❌ 'data' 錯誤持續。積極建議：請確認 FinMind 官網帳號是否可正常看到 MXF (微台全) 資料。")
