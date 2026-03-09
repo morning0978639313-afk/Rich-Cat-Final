@@ -6,14 +6,14 @@ import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 核心穩定設定：解決環境衝突並開啟 30 秒自動刷新
+# 1. 環境穩定性校正：解決環境變數衝突
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
 
-# 自動刷新功能：保證點位持續跳動
+# 自動刷新功能：每 30 秒強制更新一次點位
 st_autorefresh(interval=30 * 1000, key="datarefresh") 
 
-# 🎯 原始產品清單：完整 5 項商品描述
+# 🎯 原始產品清單：保證這 5 項商品完整歸位，不跑掉
 SYMBOL_MAP = {
     "加權指數": "^TWII",        # 台灣大盤點位
     "微台近全": "WTX=F",       # 台指期全天候合約
@@ -29,7 +29,7 @@ selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys())
 @st.cache_data(ttl=15)
 def get_safe_data(symbol):
     try:
-        # 使用 1d 範圍與 1m 間隔，確保點位精準對齊盤中價格 (如 31,997)
+        # 使用 1d 範圍與 1m 間隔，確保點位精準對齊盤中價格
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
@@ -38,7 +38,7 @@ def get_safe_data(symbol):
         result = data['chart']['result'][0]
         indicators = result['indicators']['quote'][0]
         
-        # 精確過濾數值：排除空值並抓取最新成交價
+        # 精確過濾數值：排除空值並抓取最新成交價，解決數據延遲問題
         closes = [x for x in indicators['close'] if x is not None]
         highs = [x for x in indicators['high'] if x is not None]
         lows = [x for x in indicators['low'] if x is not None]
@@ -55,7 +55,7 @@ c, h, l = get_safe_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
 st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 3. 戰情看板顯示：移除 st.divider() 等噴錯語法
+# 3. 戰情看板顯示：徹底移除所有噴錯語法
 if c is not None:
     diff = h - l
     st.success(f"📈 {selected_label} 同步成功 (實時點位)")
@@ -65,7 +65,7 @@ if c is not None:
     col2.metric("今日高", f"{h:,.2f}")
     col3.metric("今日低", f"{l:,.2f}")
     
-    # 使用 Markdown 替代會報錯的 st.divider()
+    # 使用 Markdown 橫線替代會導致報錯的 st.divider()
     st.markdown("---")
     
     # 核心：關鍵點位計算 (0.618 / 0.382)
@@ -75,4 +75,4 @@ if c is not None:
     st.error(f"🚀 壓力區 (0.618)：**{p_zone:,.2f}**")
     st.info(f"🛡️ 支撐區 (0.382)：**{s_zone:,.2f}**")
 else:
-    st.warning("⚠️ 數據同步中，請等待 30 秒自動刷新...")
+    st.warning("⚠️ 數據同步中，請等待 30 秒自動刷新或檢查連線。")
