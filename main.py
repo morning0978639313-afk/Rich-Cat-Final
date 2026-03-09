@@ -1,97 +1,102 @@
+import os
 import streamlit as st
 import pandas as pd
-import numpy as np
+import pytz
+from datetime import datetime, timedelta
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, timedelta
-import pytz
 
-# --- 1. 極速更新與時區設定 ---
-tw_tz = pytz.timezone('Asia/Taipei')
-st_autorefresh(interval=3000, key="tmf_mxf_full_hero")
+# 1. 核心穩定設定 (解決 Python 3.14 的環境崩潰問題)
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+st.set_page_config(page_title="RICH CAT 戰情室", layout="wide")
+st_autorefresh(interval=10 * 1000, key="datarefresh") # 10秒快同步
 
-st.set_page_config(page_title="微台全實戰監控", layout="wide")
-st.title("🔥 微台全 3分K - 數據攻堅終結版")
+# CSS：解決「商品名稱與數字等大」 (48px) + 黃色標題
+st.markdown("""
+    <style>
+    .yellow-title { color: #FFFF00 !important; text-align: center; font-size: 48px; font-weight: bold; margin-bottom: 20px; }
+    .big-val { font-size: 48px !important; font-weight: bold; color: white; }
+    .label-text { font-size: 22px; color: #999999; margin-bottom: -15px; }
+    .center-box { text-align: center; background: #1A1A1A; padding: 25px; border-radius: 15px; border: 1px solid #444; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 🔑 2. Token 安全登入 (已填入 Rich 的 Token) ---
+# 強制顯示黑色標題
+st.markdown("<p class='yellow-title'>🐱 RICH CAT 戰情室</p>", unsafe_allow_html=True)
+
+# 2. 🔑 Token 與 數據引擎 (鎖定 TMF 202603)
 MY_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wOSAyMDozOToxOSIsInVzZXJfaWQiOiJhcmljYTUxNSIsImVtYWlsIjoiZXZlbmNoZW41MTVAZ21haWwuY29tIiwiaXAiOiIxMjQuNi4xMS4yMTYifQ.NkLHnTiAp10uKfrc8qkt0YevD-Cc1XV062O1u3lBvh4"
 
-@st.cache_resource
-def get_api(token):
-    api = DataLoader()
-    # 解決 AttributeError，自動搜尋正確的 login 方法
-    for m in ["login", "login_by_token", "login_token"]:
-        if hasattr(api, m):
-            try:
-                getattr(api, m)(api_token=token)
-                return api
-            except: continue
-    return api
-
-api_client = get_api(MY_TOKEN)
-
-# --- 3. 數據攻堅邏輯 (MXF 全日盤專用) ---
-def fetch_mxf_full():
-    now_tw = datetime.now(tw_tz)
-    today = now_tw.strftime('%Y-%m-%d')
-    
-    # 積極測試代號：MXFR (微台全連續), MXF (微台)
-    for cid in ["MXFR", "MXF", "TMF"]:
-        try:
-            df = api_client.taiwan_futures_tick(futures_id=cid, date=today)
-            if df is not None and not df.empty and 'price' in df.columns:
-                return df, cid, "Tick"
-        except: continue
-        
-    # --- 終極備援：Snapshot (快照) 模式 ---
+@st.cache_data(ttl=5)
+def fetch_rich_cat_data():
     try:
-        snap = api_client.taiwan_futures_snapshot()
-        if snap is not None:
-            # 尋找微台全 (MXF) 的即時成交
-            target = snap[snap['futures_id'].str.contains("MXF|TMF", na=False)]
-            if not target.empty:
-                return target, "MXF_Snap", "Snapshot"
-    except: pass
-    
-    return None, None, "Fail"
-
-# --- 4. 數據計算與 UI ---
-st.write(f"⏰ **台灣站點時間**: {datetime.now(tw_tz).strftime('%H:%M:%S')}")
-
-df_raw, target_id, mode = fetch_mxf_full()
-
-if df_raw is not None:
-    st.success(f"🎯 鎖定微台全數據：{target_id} ({mode} 模式)")
-    
-    # 處理數據轉換為 3分K (如果是快照則模擬 K 棒)
-    if mode == "Tick":
-        df_raw['dt'] = pd.to_datetime(df_raw['date'] + ' ' + df_raw['time'])
-        df_raw = df_raw.set_index('dt')
-        df_3m = df_raw['price'].resample('3min').ohlc().dropna().reset_index()
-    else:
-        # 快照模式下，將成交價轉為當前 K 棒
-        df_3m = pd.DataFrame([{
-            'date': datetime.now(tw_tz),
-            'close': df_raw['last_price'].iloc[0],
-            'open': df_raw['open_price'].iloc[0],
-            'high': df_raw['high_price'].iloc[0],
-            'low': df_raw['low_price'].iloc[0]
-        }])
-
-    if not df_3m.empty:
-        last = df_3m.iloc[-1]
-        # 指標計算
-        df_3m['ma5'] = df_3m['close'].rolling(5).mean()
-        buy_score = 5 if last['close'] > last.get('ma5', 0) else 0
+        api = DataLoader()
+        api.login(api_token=MY_TOKEN)
         
-        # 顯示燈號
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("即時點位 (全日盤)", f"{last['close']:.0f}")
-            l_html = f'<div style="width:70px;height:70px;background:{"red" if buy_score>0 else "#220000"};border-radius:50%;display:inline-block;border:3px solid white;box-shadow:{"0 0 20px red" if buy_score>0 else "none"};"></div>'
-            st.markdown(l_html, unsafe_allow_html=True)
-        with c2:
-            st.write("📊 **即時數據清單**")
-            st.table(df_3m.tail(3))
+        # 抓取微台資料
+        now_tw = datetime.now(pytz.timezone('Asia/Taipei'))
+        df = api.taiwan_futures_daily(
+            futures_id='TMF', 
+            start_date=(now_tw - timedelta(days=5)).strftime('%Y-%m-%d')
+        )
+        
+        if df is not None and not df.empty:
+            df.columns = [str(c).lower().strip() for c in df.columns]
+            # 【硬鎖定】：只要 202603 合約
+            df = df[df['contract_date'] == '202603'].copy()
+            
+            # 欄位校正
+            df = df.rename(columns={'max': 'high', 'min': 'low'})
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
+            # 【關鍵】：取最新日期中成交量最大的，就是你要的「全盤」32,013
+            latest_date = df['date'].max()
+            df_latest = df[df['date'] == latest_date].sort_values('volume', ascending=False).head(1)
+            df_prev = df[df['date'] < latest_date].sort_values('volume', ascending=False).tail(1)
+            return pd.concat([df_prev, df_latest])
+    except:
+        pass
+    return None
+
+# 顯示台北實時
+now_str = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%H:%M:%S')
+st.markdown(f"<p style='text-align: center;'>🕒 台北實時：{now_str} | 🎯 監控：TMF 202603全</p>", unsafe_allow_html=True)
+
+df = fetch_rich_cat_data()
+
+# 3. 視覺呈現
+if df is not None and len(df) >= 1:
+    last = df.iloc[-1]
+    # 計算漲跌
+    change = last['close'] - df.iloc[0]['close'] if len(df) > 1 else last['close'] - last['open']
+    
+    # 燈號區 (根據 Rich 的邏輯)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"<div class='center-box'><p class='label-text'>🔴 買進燈號</p><p class='big-val'>{'🔴' if change > 0 else '⚪'}⚪⚪</p></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='center-box'><p class='label-text'>🟢 賣出燈號</p><p class='big-val'>{'🟢' if change < 0 else '⚪'}⚪⚪</p></div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # 三大看板：字體統一放大 48px
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown("<p class='label-text'>📌 商品名稱</p>", unsafe_allow_html=True)
+        st.markdown("<p class='big-val'>微台03全</p>", unsafe_allow_html=True)
+    with m2:
+        color = "#FF4B4B" if change >= 0 else "#00D100" # 紅漲綠跌
+        st.markdown("<p class='label-text'>📊 漲跌點數</p>", unsafe_allow_html=True)
+        st.markdown(f"<p class='big-val' style='color:{color};'>{change:+.0f}</p>", unsafe_allow_html=True)
+    with m3:
+        st.markdown("<p class='label-text'>💰 即時價格</p>", unsafe_allow_html=True)
+        st.markdown(f"<p class='big-val'>{last['close']:,.0f}</p>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    # 位階計算
+    diff = last['high'] - last['low']
+    st.error(f"🚀 壓力區 (0.618)：**{last['low'] + diff * 0.618:,.2f}**")
+    st.success(f"🛡️ 支撐區 (0.382)：**{last['low'] + diff * 0.382:,.2f}**")
 else:
-    st.error("❌ 'data' 錯誤持續。積極建議：請確認 FinMind 官網帳號是否可正常看到 MXF (微台全) 資料。")
+    st.warning("📊 正在同步 TMF202603 全盤數據... 請確認後點擊 Reboot。")
