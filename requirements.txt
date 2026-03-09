@@ -1,6 +1,6 @@
-yfinance
-pandas
+yfinance==0.2.40
+pandas==2.2.2
 pytz
 streamlit-autorefresh
-altair
+altair==4.2.2
 protobuf==3.20.3
