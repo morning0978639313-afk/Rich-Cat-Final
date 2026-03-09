@@ -2,6 +2,3 @@ pandas
 pytz
 streamlit-autorefresh
 requests
-FinMind
-loguru
-tqdm
