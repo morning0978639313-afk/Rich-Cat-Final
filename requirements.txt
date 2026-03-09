@@ -1,7 +1,7 @@
-yfinance==0.2.40
-pandas==2.2.2
+pandas
 pytz
 streamlit-autorefresh
 altair==4.2.2
 protobuf==3.20.3
 requests
+FinMind
