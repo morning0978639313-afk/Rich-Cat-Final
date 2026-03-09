@@ -1,8 +1,9 @@
-streamlit
+streamlit>=1.35.0
 pandas
-numpy
-FinMind
-streamlit-autorefresh
-tqdm
-loguru
 pytz
+streamlit-autorefresh
+requests
+FinMind
+loguru
+tqdm
+altair<5.0.0
