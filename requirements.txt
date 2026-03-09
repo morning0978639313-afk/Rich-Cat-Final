@@ -5,3 +5,4 @@ FinMind
 streamlit-autorefresh
 tqdm
 loguru
+pytz
