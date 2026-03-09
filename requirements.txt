@@ -5,3 +5,4 @@ requests
 FinMind
 loguru
 tqdm
+altair==4.2.2
