@@ -1,93 +1,112 @@
-import os
 import streamlit as st
 import pandas as pd
-import pytz
-from datetime import datetime, timedelta
+import numpy as np
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, time, timedelta
 
-# 1. 核心穩定設定 (徹底解決 Python 3.14 的 imghdr 崩潰問題)
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-st.set_page_config(page_title="RICH CAT 戰情室", layout="wide")
-st_autorefresh(interval=15 * 1000, key="datarefresh") 
+# --- 極速更新設定 (1秒) ---
+st_autorefresh(interval=1000, key="tmf_realtime_monitor")
 
-# CSS：商品名稱與報價數字一致 48px
-st.markdown("""
-    <style>
-    .big-val { font-size:48px !important; font-weight: bold; font-family: 'Arial Black', sans-serif; }
-    .label-text { font-size:22px; color: #999999; margin-bottom: -15px; }
-    .center-box { text-align: center; background: #1A1A1A; padding: 25px; border-radius: 15px; border: 1px solid #444; }
-    </style>
-    """, unsafe_allow_html=True)
-
-st.markdown("<h1 style='text-align: center; color: #FFD700;'>🐱 RICH CAT 戰情室</h1>", unsafe_allow_html=True)
-st.markdown(f"<p style='text-align: center;'>🕒 台北實時：{datetime.now(pytz.timezone('Asia/Taipei')).strftime('%Y-%m-%d %H:%M:%S')}</p>", unsafe_allow_html=True)
-
-# 2. 數據引擎：精準鎖定 TMF 202603 且過濾全盤資料
-@st.cache_data(ttl=10)
-def fetch_tmf_2603():
+# --- 數據獲取與快取保護 ---
+@st.cache_data(ttl=2)  # 每2秒才允許真正請求一次 API
+def get_tmf_data(token=""):
+    api = DataLoader()
+    # 抓取包含昨日的數據，確保指標17(夜盤均價)能計算
+    start_dt = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     try:
-        dl = DataLoader()
-        # 改用 TMF 抓取微台資料
-        df = dl.taiwan_futures_daily(
-            futures_id='TMF', 
-            start_date=(datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-        )
-        if df is not None and not df.empty:
-            df.columns = [str(c).lower().strip() for c in df.columns]
-            
-            # 【硬鎖定】：只要 202603 合約
-            df = df[df['contract_date'] == '202603'].copy()
-            
-            # 欄位校正：FinMind max/min 轉為 High/Low
-            df = df.rename(columns={'max': 'high', 'min': 'low'})
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-            # 【關鍵】：取最新日期中成交量最大的，就是「全盤」32,013
-            latest_date = df['date'].max()
-            df_latest = df[df['date'] == latest_date].sort_values('volume', ascending=False).head(1)
-            df_prev = df[df['date'] < latest_date].sort_values('volume', ascending=False).tail(1)
-            return pd.concat([df_prev, df_latest])
-    except: pass
-    return None
+        df = api.taiwan_futures_tick(futures_id="TMF", date=start_dt)
+        if df.empty: return pd.DataFrame()
+        
+        # 轉換為 3分K
+        df['date'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+        df = df.set_index('date')
+        ohlc = df['price'].resample('3min').ohlc()
+        ohlc['volume'] = df['qty'].resample('3min').sum()
+        return ohlc.dropna().reset_index()
+    except:
+        return pd.DataFrame()
 
-df = fetch_tmf_2603()
-
-# 3. 戰情室視覺呈獻
-if df is not None and len(df) >= 1:
-    last = df.iloc[-1]
-    # 漲跌計算
-    change = last['close'] - df.iloc[0]['close'] if len(df) > 1 else last['close'] - last['open']
+# --- 40 個指標運算 (全 3分K 基準) ---
+def calculate_logic(df):
+    if df.empty: return df
     
-    # 燈號區
+    # 基礎運算
+    df['ma5'] = df['close'].rolling(5).mean()
+    df['ma20'] = df['close'].rolling(20).mean()
+    df['day'] = df['date'].dt.date
+    df['day_open'] = df.groupby('day')['open'].transform('first')
+    df['day_high'] = df.groupby('day')['high'].expanding().max().reset_index(0, drop=True)
+    df['day_low'] = df.groupby('day')['low'].expanding().min().reset_index(0, drop=True)
+
+    # 8:45-9:05 區間 (指標10)
+    mask_905 = (df['date'].dt.time >= time(8,45)) & (df['date'].dt.time <= time(9,5))
+    df['box_h'] = df[mask_905].groupby('day')['high'].transform('max')
+    df['box_l'] = df[mask_905].groupby('day')['low'].transform('min')
+    df[['box_h', 'box_l']] = df.groupby('day')[['box_h', 'box_l']].ffill()
+
+    # 買進指標 (B1-B20) - 示例核心邏輯
+    is_red = df['close'] > df['open']
+    df['B11'] = (df['close'] > df['ma5']).astype(int)
+    df['B14'] = (is_red & is_red.shift(1) & is_red.shift(2)).astype(int)
+    df['B19'] = (df['close'] > df['open'].shift(1)).astype(int)
+    df['B20'] = (df['volume'] > 5000).astype(int) # 注意微台量級
+
+    # 賣出指標 (S1-S20)
+    is_green = df['close'] < df['open']
+    df['S8'] = (df['close'] < df['day_open']).astype(int)
+    df['S11'] = (df['close'] < df['ma5']).astype(int)
+    df['S14'] = (is_green & is_green.shift(1) & is_green.shift(2)).astype(int)
+
+    # 積分統計
+    df['buy_score'] = df[[c for c in df.columns if c.startswith('B')]].sum(axis=1)
+    df['sell_score'] = df[[c for c in df.columns if c.startswith('S')]].sum(axis=1)
+    
+    # 開盤規則
+    df['is_op_red'] = df.groupby('day')['B14'].transform(lambda x: 1 if x.head(4).max()==1 else 0)
+    df['is_op_green'] = df.groupby('day')['S14'].transform(lambda x: 1 if x.head(4).max()==1 else 0)
+    
+    return df
+
+# --- 燈號處理邏輯 ---
+def process_lights(row):
+    # 原始紅燈/綠燈計算 (開盤1 + 每5個訊號+1)
+    r_raw = min(3, (1 if row['is_op_red'] else 0) + (row['buy_score'] // 5))
+    g_raw = min(3, (1 if row['is_op_green'] else 0) + (row['sell_score'] // 5))
+
+    # Rich 的邏輯：後增加的留著，前面的對方的會減少
+    # 綠燈會抵銷紅燈，但綠燈自己會亮起
+    display_red = max(0, r_raw - g_raw)
+    display_green = g_raw 
+    
+    return int(display_red), int(display_green)
+
+# --- UI 渲染 ---
+st.title("TMF 3分K 極速監控儀表板")
+st.markdown(f"系統時間: {datetime.now().strftime('%H:%M:%S')}")
+
+df_raw = get_tmf_data()
+if not df_raw.empty:
+    df = calculate_logic(df_raw)
+    last_row = df.iloc[-1]
+    r_cnt, g_cnt = process_lights(last_row)
+
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown(f"<div class='center-box'><p class='label-text'>🔴 買進燈號</p><p class='big-val'>{'🔴' if change > 0 else '⚪'}⚪⚪</p></div>", unsafe_allow_html=True)
+        st.subheader("買進紅燈")
+        # CSS 圓燈
+        l_html = "".join([f'<div style="width:45px;height:45px;background:{"red" if i<r_cnt else "#220000"};border-radius:50%;display:inline-block;margin:5px;border:2px solid white;"></div>' for i in range(3)])
+        st.markdown(l_html, unsafe_allow_html=True)
+        st.metric("買進積分", int(last_row['buy_score']))
+
     with c2:
-        st.markdown(f"<div class='center-box'><p class='label-text'>🟢 賣出燈號</p><p class='big-val'>{'🟢' if change < 0 else '⚪'}⚪⚪</p></div>", unsafe_allow_html=True)
+        st.subheader("賣出綠燈")
+        l_html = "".join([f'<div style="width:45px;height:45px;background:{"#00FF00" if i<g_cnt else "#002200"};border-radius:50%;display:inline-block;margin:5px;border:2px solid white;"></div>' for i in range(3)])
+        st.markdown(l_html, unsafe_allow_html=True)
+        st.metric("賣出積分", int(last_row['sell_score']))
 
     st.markdown("---")
-
-    # 三大指標看板
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.markdown("<p class='label-text'>📌 商品名稱</p>", unsafe_allow_html=True)
-        st.markdown("<p class='big-val'>微台03全</p>", unsafe_allow_html=True)
-    with m2:
-        # 紅漲綠跌
-        color = "#FF4B4B" if change >= 0 else "#00D100"
-        st.markdown("<p class='label-text'>📊 漲跌點數</p>", unsafe_allow_html=True)
-        st.markdown(f"<p class='big-val' style='color:{color};'>{change:+.0f}</p>", unsafe_allow_html=True)
-    with m3:
-        # 正確對齊實戰點位 32,013
-        st.markdown("<p class='label-text'>💰 即時價格</p>", unsafe_allow_html=True)
-        st.markdown(f"<p class='big-val'>{last['close']:,.0f}</p>", unsafe_allow_html=True)
-
-    st.markdown("---")
-    # 強哥位階
-    diff = last['high'] - last['low']
-    st.error(f"🚀 壓力區 (0.618)：**{last['low'] + diff * 0.618:,.2f}**")
-    st.success(f"🛡️ 支撐區 (0.382)：**{last['low'] + diff * 0.382:,.2f}**")
+    st.write("#### 數據明細")
+    st.dataframe(df[['date', 'close', 'buy_score', 'sell_score']].tail(5))
 else:
-    st.warning("📊 正在鎖定 微台03全 (TMF) 數據... 請點擊 Reboot 重啟環境。")
+    st.info("等待 TMF 數據更新中...")
