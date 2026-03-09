@@ -6,69 +6,90 @@ from datetime import datetime, timedelta
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 核心設定
+# 1. 核心設定：30秒自動刷新
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
-st_autorefresh(interval=60 * 1000, key="datarefresh") 
+st.set_page_config(page_title="強哥戰技戰情室", layout="wide")
+st_autorefresh(interval=30 * 1000, key="datarefresh") 
 
-# 穩定台股代碼清單
+# 指定商品清單 (FinMind 格式)
 SYMBOL_MAP = {
+    "加權指數": "TAIWAN_STOCK_INDEX",
+    "微台近全": "MTX", # 微台指
     "台積電": "2330",
-    "鴻海": "2317",
-    "00850": "00850",
-    "加權指數": "TAIWAN_STOCK_INDEX"
+    "00850 (ESG永續)": "00850",
+    "0052 (科技)": "0052"
 }
 
-st.title("🐱 RICH CAT 終極戰情室")
-selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys()))
+st.title("🐱 RICH CAT 實戰戰情室")
+selected_label = st.selectbox("🎯 選擇監控商品", list(SYMBOL_MAP.keys()))
 
-# 2. 核心數據獲取：使用 FinMind API (不需 Key)
-@st.cache_data(ttl=60)
-def get_finmind_data(stock_id):
+# 2. 獲取精準數據 (FinMind 通道)
+@st.cache_data(ttl=30)
+def get_battle_data(stock_id):
     try:
         dl = DataLoader()
+        # 抓取最近 10 天數據
         start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
         
-        # 指數與個股判斷
         if stock_id == "TAIWAN_STOCK_INDEX":
             df = dl.taiwan_stock_index_daily(stock_id=stock_id, start_date=start_date)
         else:
             df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
             
         if df is not None and not df.empty:
-            # 統一欄位名稱
-            df = df.rename(columns={'close': 'Close', 'high': 'High', 'low': 'Low', 'date': 'Date'})
+            df = df.rename(columns={'close': 'Close', 'high': 'High', 'low': 'Low', 'open': 'Open', 'date': 'Date'})
             return df
         return None
     except:
         return None
 
-# 執行抓取
-df = get_finmind_data(SYMBOL_MAP[selected_label])
+df = get_battle_data(SYMBOL_MAP[selected_label])
 tz = pytz.timezone('Asia/Taipei')
-st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
+now_str = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+st.write(f"🕒 台北實時：`{now_str}`")
 
-# 3. 戰情看板顯示 (使用最基礎、不噴錯的指令)
+# 3. RICH CAT 戰技邏輯實作
 if df is not None and not df.empty:
     last = df.iloc[-1]
-    c, h, l = float(last['Close']), float(last['High']), float(last['Low'])
+    # 今日數據
+    c, h, l, o = float(last['Close']), float(last['High']), float(last['Low']), float(last['Open'])
     diff = h - l
     
-    st.success(f"✅ {selected_label} 數據已成功同步")
-    
+    # --- 戰技一：開盤價多空生命線 ---
+    if c >= o:
+        st.success(f"🔥 強勢力道：目前價格 ({c:,.2f}) 位於今日開盤價 ({o:,.2f}) 之上")
+    else:
+        st.warning(f"❄️ 弱勢力道：目前價格 ({c:,.2f}) 位於今日開盤價 ({o:,.2f}) 之下")
+
+    # 數據看板
     col1, col2, col3 = st.columns(3)
-    col1.metric("即時價", f"{c:,.2f}")
-    col2.metric("今日高", f"{h:,.2f}")
-    col3.metric("今日低", f"{l:,.2f}")
-    
-    # 畫出水平線 (替代 st.divider)
+    col1.metric("當前點位", f"{c:,.2f}")
+    col2.metric("當日最高", f"{h:,.2f}")
+    col3.metric("當日最低", f"{l:,.2f}")
+
     st.markdown("---")
-    
-    # 強哥核心：關鍵點位計算
+
+    # --- 戰技二：黃金切割率 (單元三) ---
     pressure = l + diff * 0.618
     support = l + diff * 0.382
     
-    st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
-    st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
+    col_p, col_s = st.columns(2)
+    with col_p:
+        st.error(f"🚀 壓力區 (0.618)：**{pressure:,.2f}**")
+    with col_s:
+        st.info(f"🛡️ 支撐區 (0.382)：**{support:,.2f}**")
+
+    # --- 戰術三：主力攻擊密碼 (紅黑三兵) ---
+    if len(df) >= 3:
+        last_3 = df.tail(3)
+        # 紅三兵
+        if all(last_3['Close'] > last_3['Open']):
+            st.error("🚨 【紅三兵】主力多方連續攻擊訊號！")
+        # 黑三兵
+        elif all(last_3['Close'] < last_3['Open']):
+            st.error("🚨 【黑三兵】主力空方連續壓制訊號！")
+
+    # 顯示圖表
+    st.line_chart(df.set_index('Date')['Close'])
 else:
-    st.warning("⚠️ 數據源載入中，請耐心等待或確認 GitHub 零件已裝齊。")
+    st.error("❌ 通道連線中...請稍候 30 秒或點擊左側 Manage app 重啟 (Reboot)。")
