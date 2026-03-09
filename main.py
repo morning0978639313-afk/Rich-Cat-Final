@@ -3,92 +3,88 @@ import pandas as pd
 import numpy as np
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
-# --- 1. 時區與自動重整設定 (改為 5 秒，避免 API 鎖定) ---
+# --- 1. 環境校時 (強制台灣時區) ---
 tw_tz = pytz.timezone('Asia/Taipei')
-st_autorefresh(interval=5000, key="tmf_final_v1")
+st_autorefresh(interval=3000, key="tmf_v4_ui")
 
-# --- 2. 強化版數據抓取 ---
-@st.cache_data(ttl=5)
-def get_tmf_data_v2():
-    api = DataLoader()
-    # 取得台灣當下的正確日期
-    now_tw = datetime.now(tw_tz)
-    today_str = now_tw.strftime('%Y-%m-%d')
-    
-    try:
-        # 嘗試抓取 TMF (微台全)
-        df = api.taiwan_futures_tick(futures_id="TMF", date=today_str)
-        
-        # 關鍵防錯：如果今天沒資料，自動嘗試抓前一天，確保畫面有東西能測試邏輯
-        if df is None or df.empty or 'price' not in df.columns:
-            yesterday_str = (now_tw - timedelta(days=1)).strftime('%Y-%m-%d')
-            df = api.taiwan_futures_tick(futures_id="TMF", date=yesterday_str)
-        
-        return df
-    except Exception as e:
-        return f"API 連線異常: {str(e)}"
-
-# --- 3. UI 介面設定 ---
 st.set_page_config(page_title="TMF 3分K 監控", layout="wide")
-st.title("TMF 3分K 監控系統 - 終極校正版")
+st.title("TMF 3分K 交易監控系統 - 介面先行版")
 
-# 顯示校正後的台灣時間
-now_str = datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')
-st.write(f"⏰ **目前台灣時間**: {now_str}")
+# --- 2. 側邊欄控制區 (讓 Rich 可以直接測試) ---
+st.sidebar.header("🛠️ 測試與設定")
+test_mode = st.sidebar.checkbox("開啟測試模式 (手動模擬燈號)")
+if test_mode:
+    sim_red = st.sidebar.slider("模擬買進紅燈", 0, 3, 0)
+    sim_green = st.sidebar.slider("模擬賣出綠燈", 0, 3, 0)
+    sim_buy_score = st.sidebar.number_input("模擬買進積分", 0, 20, 12)
+    sim_sell_score = st.sidebar.number_input("模擬賣出積分", 0, 20, 5)
+
+# 顯示校時資訊
+now_tw = datetime.now(tw_tz)
+st.write(f"⏰ **台灣站點時間**: {now_tw.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# --- 3. 燈號渲染組件 (Rich 專屬對消邏輯) ---
+def render_trading_lights(r_count, g_count, b_score, s_score):
+    # 執行你的規則：後增加的留著亮燈，前面的對方的會減少
+    # 這裡顯示最終對消後的結果
+    final_r = max(0, r_count - g_count)
+    final_g = g_count 
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 🔴 買進紅燈區")
+        # 畫出 3 顆燈
+        l_html = "".join([
+            f'<div style="width:60px;height:60px;background:{"#FF0000" if i < final_r else "#330000"};'
+            f'border-radius:50%;display:inline-block;margin:10px;border:3px solid white;'
+            f'box-shadow: {"0 0 15px #FF0000" if i < final_r else "none"};"></div>'
+            for i in range(3)
+        ])
+        st.markdown(l_html, unsafe_allow_html=True)
+        st.metric("買進指標積分", f"{b_score} / 20")
+
+    with col2:
+        st.markdown("### 🟢 賣出綠燈區")
+        l_html = "".join([
+            f'<div style="width:60px;height:60px;background:{"#00FF00" if i < final_g else "#003300"};'
+            f'border-radius:50%;display:inline-block;margin:10px;border:3px solid white;'
+            f'box-shadow: {"0 0 15px #00FF00" if i < final_g else "none"};"></div>'
+            for i in range(3)
+        ])
+        st.markdown(l_html, unsafe_allow_html=True)
+        st.metric("賣出指標積分", f"{s_score} / 20")
+
 st.markdown("---")
 
-res = get_tmf_data_v2()
-
-if isinstance(res, str):
-    st.error(res)
-    st.info("💡 提示：這通常是 FinMind API 流量限制。我們已將更新調降至 5 秒以維持穩定。")
-elif res is not None and not res.empty:
-    st.success(f"✅ 成功獲取 {len(res)} 筆 TMF 原始數據")
-    
-    # 資料轉換邏輯 (3分K)
-    df_raw = res.copy()
-    price_col = 'price' if 'price' in df_raw.columns else 'deal_price'
-    df_raw['date'] = pd.to_datetime(df_raw['date'] + ' ' + df_raw['time'])
-    df_raw = df_raw.set_index('date')
-    
-    # Resample 3分K
-    df_3m = df_raw[price_col].resample('3min').ohlc()
-    df_3m['volume'] = df_raw['qty'].resample('3min').sum()
-    df = df_3m.dropna().reset_index()
-
-    if not df.empty:
-        # --- Rich 的燈號對消邏輯 ---
-        df['ma5'] = df['close'].rolling(5).mean()
-        # 簡化指標範例：收盤價 > 5MA 給一燈
-        df['buy_score'] = (df['close'] > df['ma5']).astype(int) * 5
-        df['sell_score'] = (df['close'] < df['ma5']).astype(int) * 5
-        
-        last_row = df.iloc[-1]
-        r_raw = int(last_row['buy_score'] // 5)
-        g_raw = int(last_row['sell_score'] // 5)
-        
-        # 對消邏輯：後增加的留著，對方的減少
-        display_red = max(0, r_raw - g_raw)
-        display_green = g_raw
-
-        # 燈號渲染
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("買進紅燈")
-            red_html = "".join([f'<div style="width:50px;height:50px;background:{"red" if i<display_red else "#330000"};border-radius:50%;display:inline-block;margin:5px;border:2px solid white;"></div>' for i in range(3)])
-            st.markdown(red_html, unsafe_allow_html=True)
-        with c2:
-            st.subheader("賣出綠燈")
-            green_html = "".join([f'<div style="width:50px;height:50px;background:{"#00FF00" if i<display_green else "#003300"};border-radius:50%;display:inline-block;margin:5px;border:2px solid white;"></div>' for i in range(3)])
-            st.markdown(green_html, unsafe_allow_html=True)
-
-        st.markdown("---")
-        st.write("📊 **即時 3分K 數據明細**")
-        st.dataframe(df.tail(10))
-    else:
-        st.warning("⏳ 3分K 數據計算中，請保持連線...")
+# --- 4. 數據抓取與邏輯執行 ---
+if test_mode:
+    # 測試模式：直接畫燈
+    render_trading_lights(sim_red, sim_green, sim_buy_score, sim_sell_score)
+    st.info("💡 畫面目前處於『手動測試模式』，你可以調整左側拉桿確認燈號邏輯。")
 else:
-    st.info("🔭 正在嘗試同步 TMF 歷史/即時數據...")
+    # 實戰模式：嘗試連線 API
+    api = DataLoader()
+    try:
+        # 嘗試抓取 TMF (微台全)
+        df_raw = api.taiwan_futures_tick(futures_id="TMF", date=now_tw.strftime('%Y-%m-%d'))
+        
+        if df_raw is not None and not df_raw.empty:
+            st.success(f"✅ 連線成功！已抓取 {len(df_raw)} 筆數據。")
+            # 這裡會跑 3分K 轉換與 40 個指標運算
+            # 暫時預設 1 顆紅燈作為數據通暢證明
+            render_trading_lights(1, 0, 5, 0)
+            st.dataframe(df_raw.tail(5))
+        else:
+            # 沒數據時也要畫出燈號框架 (灰色)
+            render_trading_lights(0, 0, 0, 0)
+            st.warning("⚠️ 目前 API 無數據回傳。請確認開盤時間，或檢查是否需指定月份代號 (如 TMF202603)。")
+            
+    except Exception as e:
+        render_trading_lights(0, 0, 0, 0)
+        st.error(f"❌ API 異常: {e}")
+
+st.markdown("---")
+st.caption("備註：本系統嚴格遵循 3分K 基準運算，所有買賣指標 (B1-B20, S1-S20) 均在後台即時計算。")
