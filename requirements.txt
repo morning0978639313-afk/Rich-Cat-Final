@@ -3,3 +3,6 @@ pandas
 pytz
 streamlit-autorefresh
 FinMind
+tqdm
+loguru
+altair<5.0.0
