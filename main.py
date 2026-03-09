@@ -3,125 +3,113 @@ import pandas as pd
 import numpy as np
 from FinMind.data import DataLoader
 from streamlit_autorefresh import st_autorefresh
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import pytz
 
-# --- 1. 環境設定 (台灣時區與自動重整) ---
+# --- 1. 環境設定 ---
 tw_tz = pytz.timezone('Asia/Taipei')
-# 設定 5 秒重新整理一次，有 Token 就不怕被封鎖
-st_autorefresh(interval=5000, key="tmf_final_hero")
+st_autorefresh(interval=5000, key="tmf_final_v5") # 5秒刷新一次最穩定
 
-# --- 🔑 2. Token 設定區 (已填入 Rich 的 Token) ---
-MY_FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wOSAyMDozOToxOSIsInVzZXJfaWQiOiJhcmljYTUxNSIsImVtYWlsIjoiZXZlbmNoZW41MTVAZ21haWwuY29tIiwiaXAiOiIxMjQuNi4xMS4yMTYifQ.NkLHnTiAp10uKfrc8qkt0YevD-Cc1XV062O1u3lBvh4"
+st.set_page_config(page_title="TMF 微台全監控", layout="wide")
+st.title("TMF 微台全 3分K 交易系統")
 
-@st.cache_data(ttl=5)
-def get_tmf_data_live(token):
+# --- 🔑 2. Token 與 登入 (強化相容性) ---
+MY_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJkYXRlIjoiMjAyNi0wMy0wOSAyMDozOToxOSIsInVzZXJfaWQiOiJhcmljYTUxNSIsImVtYWlsIjoiZXZlbmNoZW41MTVAZ21haWwuY29tIiwiaXAiOiIxMjQuNi4xMS4yMTYifQ.NkLHnTiAp10uKfrc8qkt0YevD-Cc1XV062O1u3lBvh4"
+
+@st.cache_resource
+def get_api_client(token):
     api = DataLoader()
-    if token:
-        try:
-            # 正確的登入語法
-            api.login(api_token=token)
-        except Exception as e:
-            st.error(f"Token 登入發生錯誤: {e}")
-    
-    now_tw = datetime.now(tw_tz)
-    # 抓取包含昨日的數據，確保計算指標(如夜盤均價)不中斷
-    start_dt = (now_tw - timedelta(days=1)).strftime('%Y-%m-%d')
     try:
-        # 抓取 TMF (微台全)
-        df = api.taiwan_futures_tick(futures_id="TMF", date=start_dt)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # 轉換為 3分K
-        df['date'] = pd.to_datetime(df['date'] + ' ' + df['time'])
-        df = df.set_index('date')
-        
-        # Resample 成 3分K OHLCV
-        ohlc = df['price'].resample('3min').ohlc()
-        ohlc['volume'] = df['qty'].resample('3min').sum()
-        
-        # 移除空值並重設索引
-        return ohlc.dropna().reset_index()
-    except Exception as e:
-        st.error(f"數據抓取失敗: {e}")
-        return pd.DataFrame()
+        # 嘗試多種登入語法
+        if hasattr(api, 'login'):
+            api.login(api_token=token)
+        elif hasattr(api, 'login_by_token'):
+            api.login_by_token(api_token=token)
+    except:
+        pass
+    return api
 
-# --- 3. 指標運算核心 (3分K 基準) ---
-def calculate_all_signals(df):
-    if df.empty:
-        return df
-        
-    # 基礎運算 (MA 均線)
+api_client = get_api_client(MY_TOKEN)
+
+# --- 3. 指標運算 (3分K 基準) ---
+def calculate_signals(df):
+    if df.empty: return df
+    
+    # A. 基礎線
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma20'] = df['close'].rolling(20).mean()
+    df['ma90'] = df['close'].rolling(90).mean()
     
-    # 當日高低點 (以 08:45 日盤開盤為基準)
-    df['day'] = df['date'].dt.date
-    df['day_open'] = df.groupby('day')['open'].transform('first')
-    df['day_high'] = df.groupby('day')['high'].expanding().max().reset_index(0, drop=True)
-    df['day_low'] = df.groupby('day')['low'].expanding().min().reset_index(0, drop=True)
-
-    # --- 買進訊號判定 (B1-B20) ---
+    # B. 當日參考點 (08:45)
+    df['date_only'] = df['date'].dt.date
+    df['day_open'] = df.groupby('date_only')['open'].transform('first')
+    df['day_high'] = df.groupby('date_only')['high'].expanding().max().reset_index(0, drop=True)
+    df['day_low'] = df.groupby('date_only')['low'].expanding().min().reset_index(0, drop=True)
+    
+    # C. 買進指標 (B1-B20)
     is_red = df['close'] > df['open']
-    # 實作幾個核心規則作為範例
-    df['B11'] = (df['close'] > df['ma5']).astype(int)      # 5MA之上
-    df['B14'] = (is_red & is_red.shift(1) & is_red.shift(2)).astype(int) # 連續三根紅K
-    df['B19'] = (df['close'] > df['open'].shift(1)).astype(int)         # 收盤高於前一根開盤
-    df['B20'] = (df['volume'] > 2000).astype(int)         # 成交量大於門檻 (微台建議 2000)
-
-    # --- 賣出訊號判定 (S1-S20) ---
-    is_green = df['close'] < df['open']
-    df['S8'] = (df['close'] < df['day_open']).astype(int)  # 開盤價之下
-    df['S11'] = (df['close'] < df['ma5']).astype(int)     # 跌破 5MA
-    df['S14'] = (is_green & is_green.shift(1) & is_green.shift(2)).astype(int) # 連續三根綠K
+    df['B1'] = (df['low'] <= df['day_high'] * (1-0.382)).astype(int) # 0.382回檔
+    df['B10'] = (df['close'] > df['day_open']).astype(int) # 突破開盤
+    df['B11'] = (df['close'] > df['ma5']).astype(int) # 5MA之上
+    df['B14'] = (is_red & is_red.shift(1) & is_red.shift(2)).astype(int) # 連三紅
+    df['B20'] = (df['volume'] > 1500).astype(int) # 量大門檻
     
-    # 積分統計 (將所有 B 開頭與 S 開頭的指標加總)
+    # D. 賣出指標 (S1-S20)
+    is_green = df['close'] < df['open']
+    df['S8'] = (df['close'] < df['day_open']).astype(int) # 開盤下
+    df['S11'] = (df['close'] < df['ma5']).astype(int) # 跌破5MA
+    df['S14'] = (is_green & is_green.shift(1) & is_green.shift(2)).astype(int) # 連三綠
+    
+    # E. 積分
     df['buy_score'] = df[[c for c in df.columns if c.startswith('B')]].sum(axis=1)
     df['sell_score'] = df[[c for c in df.columns if c.startswith('S')]].sum(axis=1)
     
-    # 開盤首4根 K 線規則 (紅燈 1)
-    df['is_op_red'] = df.groupby('day')['B14'].transform(lambda x: 1 if x.head(4).max()==1 else 0)
-    df['is_op_green'] = df.groupby('day')['S14'].transform(lambda x: 1 if x.head(4).max()==1 else 0)
-    
+    # F. 開盤燈 (首4根含連3)
+    df['is_op_red'] = df.groupby('date_only')['B14'].transform(lambda x: 1 if x.head(4).max()==1 else 0)
     return df
 
-# --- 4. 介面渲染 ---
-st.set_page_config(page_title="TMF 監控系統", layout="wide")
-st.title("TMF 微台全 3分K 交易監控")
-st.write(f"⏰ **台灣站點時間**: {datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+# --- 4. 數據抓取與渲染 ---
+now_tw = datetime.now(tw_tz)
+st.write(f"⏰ **台灣站點時間**: {now_tw.strftime('%H:%M:%S')}")
 
-# 獲取數據
-df_raw = get_tmf_data_live(MY_FINMIND_TOKEN)
-
-if not df_raw.empty:
-    df = calculate_all_signals(df_raw)
-    last = df.iloc[-1]
+try:
+    # 抓取 TMF (微台全)
+    raw = api_client.taiwan_futures_tick(futures_id="TMF", date=now_tw.strftime('%Y-%m-%d'))
     
-    # 燈號計數邏輯 (每 5 分亮一顆燈)
-    r_raw = min(3, (1 if last['is_op_red'] else 0) + (last['buy_score'] // 5))
-    g_raw = min(3, (1 if last['is_op_green'] else 0) + (last['sell_score'] // 5))
-    
-    # Rich 的「後進對消」邏輯：綠燈會扣除紅燈存量
-    final_red = max(0, r_raw - g_raw)
-    final_green = g_raw
+    if raw is not None and not raw.empty:
+        # 轉換為 3分K
+        raw['date'] = pd.to_datetime(raw['date'] + ' ' + raw['time'])
+        raw = raw.set_index('date')
+        ohlc = raw['price'].resample('3min').ohlc()
+        ohlc['volume'] = raw['qty'].resample('3min').sum()
+        df = calculate_signals(ohlc.dropna().reset_index())
+        
+        last = df.iloc[-1]
+        
+        # 燈號邏輯 (對消後顯示)
+        r_raw = min(3, (1 if last['is_op_red'] else 0) + (last['buy_score'] // 5))
+        g_raw = min(3, (last['sell_score'] // 5))
+        f_red = max(0, r_raw - g_raw)
+        f_green = g_raw
 
-    # 燈號顯示
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### 🔴 買進紅燈")
-        l_html = "".join([f'<div style="width:75px;height:75px;background:{"#FF0000" if i<final_red else "#220000"};border-radius:50%;display:inline-block;margin:10px;border:3px solid white;box-shadow:{"0 0 20px #FF0000" if i<final_red else "none"};"></div>' for i in range(3)])
-        st.markdown(l_html, unsafe_allow_html=True)
-        st.metric("買進指標積分", f"{int(last['buy_score'])} / 20")
+        # UI 渲染
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### 🔴 買進紅燈")
+            l_html = "".join([f'<div style="width:70px;height:70px;background:{"red" if i<f_red else "#220000"};border-radius:50%;display:inline-block;margin:10px;border:3px solid white;box-shadow:{"0 0 20px red" if i<f_red else "none"};"></div>' for i in range(3)])
+            st.markdown(l_html, unsafe_allow_html=True)
+            st.metric("買進積分", int(last['buy_score']))
+        with c2:
+            st.markdown("### 🟢 賣出綠燈")
+            l_html = "".join([f'<div style="width:70px;height:70px;background:{"#00FF00" if i<f_green else "#002200"};border-radius:50%;display:inline-block;margin:10px;border:3px solid white;box-shadow:{"0 0 20px #00FF00" if i<f_green else "none"};"></div>' for i in range(3)])
+            st.markdown(l_html, unsafe_allow_html=True)
+            st.metric("賣出積分", int(last['sell_score']))
 
-    with c2:
-        st.markdown("### 🟢 賣出綠燈")
-        l_html = "".join([f'<div style="width:75px;height:75px;background:{"#00FF00" if i<final_green else "#002200"};border-radius:50%;display:inline-block;margin:10px;border:3px solid white;box-shadow:{"0 0 20px #00FF00" if i<final_green else "none"};"></div>' for i in range(3)])
-        st.markdown(l_html, unsafe_allow_html=True)
-        st.metric("賣出指標積分", f"{int(last['sell_score'])} / 20")
+        st.markdown("---")
+        st.write("📊 **即時 3分K 數據明細 (包含指標計算)**")
+        st.dataframe(df.tail(10))
+    else:
+        st.info("📡 正在等待 TMF 夜盤數據流進來... (目前 21:05 為交易時間)")
 
-    st.markdown("---")
-    st.write("📊 **即時 3分K 數據明細**")
-    st.dataframe(df[['date', 'open', 'high', 'low', 'close', 'volume', 'buy_score', 'sell_score']].tail(5))
-else:
-    st.warning("📡 正在同步 TMF 數據... 請確認目前是否為交易時段 (08:45 - 次日 05:00)。")
+except Exception as e:
+    st.error(f"連線中，請稍候: {e}")
