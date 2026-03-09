@@ -2,99 +2,76 @@ import os
 import streamlit as st
 import pandas as pd
 import pytz
-from datetime import datetime, timedelta
-from FinMind.data import DataLoader
+import requests
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# 1. 核心穩定設定與 30 秒戰情刷新
+# 1. 系統層級校正：解決舊版 Streamlit 環境衝突
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-st.set_page_config(page_title="RICH CAT 強哥戰情室", layout="wide")
-st_autorefresh(interval=60 * 1000, key="datarefresh") 
+st.set_page_config(page_title="RICH CAT 終極戰情室", layout="centered")
 
-# 🎯 策略報告指定 5 大商品 (FinMind Code)
+# 自動刷新：每 30 秒強制同步，確保戰情不延遲
+st_autorefresh(interval=30 * 1000, key="datarefresh") 
+
+# 🎯 完整 5 大商品清單歸位 (包含微台、ADR、00850)
 SYMBOL_MAP = {
-    "加權指數": "TAIWAN_STOCK_INDEX",
-    "微台近全": "TX",
-    "台積電": "2330",
+    "加權指數": "^TWII",
+    "微台近全": "WTX=F",
+    "台積電": "2330.TW",
     "台積電 ADR": "TSM",
-    "ESG 永續 (00850)",
-    "0052"
+    "ESG 永續 (00850)": "00850.TW"
 }
 
-st.title("🐱 RICH CAT 戰術指揮中心")
-selected_label = st.selectbox("🎯 選擇作戰標的", list(SYMBOL_MAP.keys()))
+st.title("🐱 RICH CAT 終極戰情室")
+selected_label = st.selectbox("🎯 切換追蹤商品", list(SYMBOL_MAP.keys()))
 
-# 2. 數據獲取 (徹底斷開 Yahoo)
-@st.cache_data(ttl=60)
-def get_strategy_data(stock_id):
+# 2. 精準數據引擎：解決點位跑掉與 Yahoo 封鎖問題
+@st.cache_data(ttl=15)
+def get_verified_data(symbol):
     try:
-        dl = DataLoader()
-        # 抓取近 10 日數據以計算波段高低點 
-        start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-        if stock_id == "TAIWAN_STOCK_INDEX":
-            df = dl.taiwan_stock_index_daily(stock_id=stock_id, start_date=start_date)
-        else:
-            df = dl.taiwan_stock_daily(stock_id=stock_id, start_date=start_date)
+        # 使用 1m (分鐘線) 獲取最即時的成交序列
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
         
-        if df is not None and not df.empty:
-            df = df.rename(columns={'close': 'Close', 'high': 'High', 'low': 'Low', 'open': 'Open', 'date': 'Date'})
-            return df
-        return None
+        result = data['chart']['result'][0]
+        quote = result['indicators']['quote'][0]
+        
+        # 排除空值，抓取真實的盤中 Close, High, Low
+        closes = [x for x in quote['close'] if x is not None]
+        highs = [x for x in quote['high'] if x is not None]
+        lows = [x for x in quote['low'] if x is not None]
+        
+        if not closes: return None, None, None
+            
+        return float(closes[-1]), float(max(highs)), float(min(lows))
     except:
-        return None
+        return None, None, None
 
-df = get_strategy_data(SYMBOL_MAP[selected_label])
+# 數據計算
+c, h, l = get_verified_data(SYMBOL_MAP[selected_label])
+tz = pytz.timezone('Asia/Taipei')
+st.write(f"🕒 台北實時：`{datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
 
-# 3. 戰技指標計算 [cite: 4, 5, 104]
-if df is not None and not df.empty:
-    last = df.iloc[-1]
-    c, h, l, o = float(last['Close']), float(last['High']), float(last['Low']), float(last['Open'])
+# 3. 戰情看板顯示：移除所有噴錯語法 (如 st.divider)
+if c is not None:
     diff = h - l
+    st.success(f"📈 {selected_label} 連線成功 (實時點位)")
     
-    # A. 黃金切割率位階 (波浪理論核心) [cite: 4, 5]
-    p_618 = l + diff * 0.618  # 強力壓制/轉折位
-    p_382 = l + diff * 0.382  # 強弱分水嶺/支撐位
+    col1, col2, col3 = st.columns(3)
+    col1.metric("即時價", f"{c:,.2f}")
+    col2.metric("今日高", f"{h:,.2f}")
+    col3.metric("今日低", f"{l:,.2f}")
     
-    # B. 關鍵 K 棒目標價公式 
-    # 公式：(收盤 - 開盤) * 0.618 + 開盤
-    target_price = (c - o) * 0.618 + o
-    
-    # 4. 戰情看板介面
-    st.success(f"✅ {selected_label} 通訊導通 | 台北時間: {datetime.now(pytz.timezone('Asia/Taipei')).strftime('%H:%M:%S')}")
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("實時成交價", f"{c:,.2f}")
-    m2.metric("今日最高點", f"{h:,.2f}")
-    m3.metric("今日最低點", f"{l:,.2f}")
-    
+    # 使用 Markdown 橫線，保證不報 AttributeError
     st.markdown("---")
     
-    # 5. 策略警示與訊號判斷
-    left, right = st.columns(2)
+    # 強哥核心：關鍵點位計算 (0.618 / 0.382)
+    p_zone = l + diff * 0.618
+    s_zone = l + diff * 0.382
     
-    with left:
-        st.subheader("🛡️ 波浪位階 (黃金切割)")
-        # 報告準則：回歸不破 0.382 代表強，跌破 0.618 代表趨勢破壞 
-        if c > p_382:
-            st.write("📈 **多方強勢區**：回測不破 0.382，隨時再噴 ")
-        elif c < p_618:
-            st.write("📉 **空方破壞區**：跌破 0.618，上升段已瓦解 ")
-        
-        st.error(f"🔴 壓制區 (0.618)：{p_618:,.2f}")
-        st.info(f"🔵 支撐區 (0.382)：{p_382:,.2f}")
-
-    with right:
-        st.subheader("🚀 關鍵 K 棒預測")
-        st.warning(f"🎯 戰術目標價：{target_price:,.2f}")
-        st.write("> *公式依據：(收盤-開盤) * 0.618 + 開盤 *")
-
-    # 6. 主力攻擊密碼偵測 (三兵訊號判斷邏輯示意) 
-    st.markdown("---")
-    st.subheader("⚔️ 主力攻擊密碼")
-    if c > o:
-        st.write("🔥 **疑似紅三兵發動**：若連續三根實體紅棒，代表主力大舉進場 [cite: 87, 91]")
-    else:
-        st.write("❄️ **疑似黑三兵下殺**：若連續三根實體黑棒，代表空方主力倒貨 [cite: 88, 91]")
-
+    st.error(f"🚀 壓力區 (0.618)：**{p_zone:,.2f}**")
+    st.info(f"🛡️ 支撐區 (0.382)：**{s_zone:,.2f}**")
 else:
-    st.error("❌ 數據源連線中，請點擊下方 Manage app 並 Reboot app。")
+    st.warning("⚠️ 數據源響應中，請等待 30 秒自動刷新...")
